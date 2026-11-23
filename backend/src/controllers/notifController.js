@@ -1,0 +1,123 @@
+import prisma from "../prisma.js";
+import {
+    emitNotificationRead,
+    notificationInclude,
+    serializeNotification,
+} from "../services/notificationService.js";
+import { emitInboxUnreadCounts } from "../services/inboxService.js";
+
+export async function createNotif(req, res){
+    return res.status(403).json({
+        message: "Notifications are created automatically from backend events.",
+    });
+}
+
+
+export async function getNotif(req, res){
+
+    try {
+        const userId = req.user.id;
+        if (!userId) {
+            return res.status(400).json({ message: "userId is required" });}
+
+        const allNotifs = await prisma.notification.findMany({
+            where: { userId },
+            include: notificationInclude,
+            orderBy: {createdAt: 'desc'}
+        });
+
+        return res.status(200).json({
+            allNotifs: allNotifs.map((notification) => serializeNotification(notification)),
+        });
+    }
+    catch (error){
+        console.error("getNotif error: ", error);
+        return res.status(500).json({ message: "Failed to get a notification" });
+    }  
+}
+
+
+export async function markAsRead(req, res){
+    try {
+        const userId = req.user.id;
+        if (!userId) {
+            return res.status(400).json({ message: "userId is required" });
+        }
+
+        const notifId = parseInt(req.params.id);
+
+        if (Number.isNaN(notifId) || notifId < 1) {
+            return res.status(400).json({ message: "Invalid notification id" });
+        }
+
+        const notification = await prisma.notification.findFirst({
+            where: { id: notifId , userId }
+        });
+
+        if (!notification) {
+            return res.status(404).json({ message: "Notification not found"});
+        }
+
+        const updatedNotif = await prisma.notification.update({
+            where: { id: notifId },
+            data: { read: true },
+            include: notificationInclude,
+        });
+
+        emitNotificationRead({
+            userId,
+            notificationId: updatedNotif.id,
+        });
+        await emitInboxUnreadCounts(userId);
+
+        return res.status(200).json({ notification: serializeNotification(updatedNotif)});
+
+    }
+    catch (error){
+        console.error("markAsRead error: ", error);
+        return res.status(500).json({ message: "Failed to mark a notification as read" });
+    }
+    
+}
+
+
+export async function deleteNotif(req, res){
+
+    try {
+        const userId = req.user.id;
+        if (!userId) {
+            return res.status(400).json({ message: "userId is required" });
+        }
+
+        const notifId = parseInt(req.params.id);
+
+        if (Number.isNaN(notifId) || notifId < 1) {
+            return res.status(400).json({ message: "Invalid notification id" });
+        }
+
+        const notification = await prisma.notification.findFirst({
+            where: { id: notifId , userId }
+        });
+        if (!notification) {
+            return res.status(404).json({ message: "Notification not found"});
+        }
+
+        const wasUnread = !notification.read;
+
+        await prisma.notification.delete({
+            where: { id: notification.id }
+        });
+
+        if (wasUnread) {
+            await emitInboxUnreadCounts(userId);
+        }
+
+        return res.status(200).json({ message: "Notification removed" });
+    }
+    catch (error){
+        console.error("deleteNotif error: ", error);
+        return res.status(500).json({ message: "Failed to delete a notification" });
+    }
+}
+
+export default { createNotif, getNotif, markAsRead, deleteNotif };

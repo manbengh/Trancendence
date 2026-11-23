@@ -1,0 +1,689 @@
+import {
+  createPost,
+  getAllPosts,
+  getFriendsPosts,
+  searchPosts,
+  deletePost,
+  likePost,
+  unlikePost,
+  createComment,
+  deleteComment,
+  likeComment,
+  unlikeComment,
+  favoritePost,
+  unfavoritePost,
+  favoriteComment,
+  unfavoriteComment,
+} from "../services/postService.js";
+import { getOptionalEnv } from "../env.js";
+import {
+  createNotificationIfRelevant,
+  deleteNotificationIfExists,
+  NOTIFICATION_TYPES,
+} from "../services/notificationService.js";
+import { POST_MESSAGES } from "../constants/postMessages.js";
+
+const postErrorStatus = (error) => {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+
+  if (
+    error.message === POST_MESSAGES.errors.postNotFound ||
+    error.message === POST_MESSAGES.errors.commentNotFound ||
+    error.message === POST_MESSAGES.errors.userNotFound
+  ) {
+    return 404;
+  }
+
+  if (
+    error.message === POST_MESSAGES.errors.notAllowedDeleteComment ||
+    error.message === "You are not allowed to delete this post"
+  ) {
+    return 403;
+  }
+
+  return null;
+};
+
+export const getPostsHandler = async (req, res) => {
+  try {
+    const currentUserId = req.user?.id ?? req.user?.userId;
+    const posts = await getAllPosts(currentUserId);
+    res.status(200).json(posts);
+  } catch (error) {
+    console.error("Erreur getPostsHandler :", error);
+    res.status(500).json({ message: POST_MESSAGES.errors.unableFetchPosts });
+  }
+};
+
+export const searchPostsHandler = async (req, res) => {
+  try {
+    const currentUserId = req.user?.id ?? req.user?.userId;
+    const result = await searchPosts(currentUserId, {
+      q: req.query.q,
+      authorUsername: req.query.author,
+      mediaType: req.query.mediaType,
+      favoritesOnly: req.query.favoritesOnly === "true",
+      sort: req.query.sort,
+      page: req.query.page,
+      limit: req.query.limit,
+    });
+    res.status(200).json(result);
+  } catch (error) {
+    console.error("Erreur searchPostsHandler :", error);
+    res.status(500).json({ message: POST_MESSAGES.errors.unableSearchPosts });
+  }
+};
+
+export const getFriendsPostsHandler = async (req, res) => {
+  try {
+    const currentUserId = req.user?.id ?? req.user?.userId;
+    const posts = await getFriendsPosts(currentUserId);
+    res.status(200).json(posts);
+  } catch (error) {
+    console.error("Erreur getFriendsPostsHandler :", error);
+    res.status(500).json({ message: POST_MESSAGES.errors.unableFetchFriendsPosts });
+  }
+};
+
+export const createPostHandler = async (req, res) => {
+  try {
+    const { content } = req.body;
+
+    if (!content || typeof content !== "string" || !content.trim()) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.postContentRequired,
+      });
+    }
+
+    const authorId = req.user?.id ?? req.user?.userId;
+
+    if (!authorId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    let mediaUrl = null;
+
+    if (req.file) {
+      mediaUrl = `/uploads/${req.file.filename}`;
+    }
+
+    const newPost = await createPost({
+      content: content.trim(),
+      mediaUrl,
+      authorId,
+    });
+
+    return res.status(201).json({
+      message: POST_MESSAGES.success.postCreated,
+      post: newPost,
+    });
+  } catch (error) {
+    console.error("Erreur createPostHandler :", error);
+    const status = postErrorStatus(error);
+
+    if (status) {
+      return res.status(status).json({
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableCreatePost,
+    });
+  }
+};
+
+export const deleteCommentHandler = async (req, res) => {
+  try {
+    const commentId = Number(req.params.id);
+    const userId = req.user?.id ?? req.user?.userId;
+
+    if (Number.isNaN(commentId) || commentId < 1) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.invalidCommentId,
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    const deleteResult = await deleteComment(commentId, userId);
+
+    if (deleteResult?.postAuthorId) {
+      await deleteNotificationIfExists({
+        userId: deleteResult.postAuthorId,
+        actorId: userId,
+        type: NOTIFICATION_TYPES.COMMENT,
+        postId: deleteResult.postId,
+      });
+    }
+
+    return res.status(200).json({
+      message: POST_MESSAGES.success.commentDeleted,
+    });
+  } catch (error) {
+    console.error("Erreur deleteCommentHandler :", error);
+
+    if (error.message === POST_MESSAGES.errors.commentNotFound) {
+      return res.status(404).json({
+        message: error.message,
+      });
+    }
+
+    if (error.message === POST_MESSAGES.errors.notAllowedDeleteComment) {
+      return res.status(403).json({
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableDeleteComment,
+    });
+  }
+};
+
+export const deletePostHandler = async (req, res) => {
+  try {
+    const postId = Number(req.params.id);
+    const userId = req.user?.id ?? req.user?.userId;
+
+    if (!postId || Number.isNaN(postId)) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.invalidPostId,
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    await deletePost(postId, userId);
+
+    return res.status(200).json({
+      message: POST_MESSAGES.success.postDeleted,
+    });
+  } catch (error) {
+    console.error("Erreur deletePostHandler :", error);
+    const status = postErrorStatus(error);
+
+    if (status) {
+      return res.status(status).json({
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableDeletePost,
+    });
+  }
+};
+
+export const likePostHandler = async (req, res) => {
+  try {
+    const postId = Number(req.params.id);
+    const userId = req.user?.id ?? req.user?.userId;
+
+    if (!postId || Number.isNaN(postId)) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.invalidPostId,
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    const likeResult = await likePost(postId, userId);
+
+    if (likeResult.created) {
+      await createNotificationIfRelevant({
+        userId: likeResult.postAuthorId,
+        actorId: userId,
+        type: NOTIFICATION_TYPES.LIKE,
+        postId,
+      });
+    }
+
+    return res.status(200).json({
+      message: POST_MESSAGES.success.postLiked,
+    });
+  } catch (error) {
+    console.error("Erreur likePostHandler :", error);
+    const status = postErrorStatus(error);
+
+    if (status) {
+      return res.status(status).json({
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableLikePost,
+    });
+  }
+};
+
+export const unlikePostHandler = async (req, res) => {
+  try {
+    const postId = Number(req.params.id);
+    const userId = req.user?.id ?? req.user?.userId;
+
+    if (!postId || Number.isNaN(postId)) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.invalidPostId,
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    const result = await unlikePost(postId, userId);
+
+    if (result.removed) {
+      await deleteNotificationIfExists({
+        userId: result.postAuthorId,
+        actorId: userId,
+        type: NOTIFICATION_TYPES.LIKE,
+        postId,
+      });
+    }
+
+    return res.status(200).json({
+      message: POST_MESSAGES.success.postUnliked,
+    });
+  } catch (error) {
+    console.error("Erreur unlikePostHandler :", error);
+    const status = postErrorStatus(error);
+
+    if (status) {
+      return res.status(status).json({
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableUnlikePost,
+    });
+  }
+};
+
+export const createCommentHandler = async (req, res) => {
+  try {
+    const postId = Number(req.params.id);
+    const userId = req.user?.id ?? req.user?.userId;
+    const { content } = req.body;
+
+    if (Number.isNaN(postId) || postId < 1) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.invalidPostId,
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.commentContentRequired,
+      });
+    }
+
+    const seedScriptKey = getOptionalEnv("SEED_SCRIPT_KEY");
+    const skipModeration =
+      Boolean(seedScriptKey) && req.get("x-seed-script-key") === seedScriptKey;
+
+    const { comment, postAuthorId } = await createComment({
+      postId,
+      userId,
+      content: content.trim(),
+      mediaUrl: null,
+      skipModeration,
+    });
+
+    await createNotificationIfRelevant({
+      userId: postAuthorId,
+      actorId: userId,
+      type: NOTIFICATION_TYPES.COMMENT,
+      postId,
+    });
+
+    return res.status(201).json({
+      message: POST_MESSAGES.success.commentCreated,
+      comment,
+    });
+  } catch (error) {
+    if (error.message === POST_MESSAGES.errors.inappropriateComment) {
+      return res.status(422).json({
+        message: error.message,
+      });
+    }
+
+    if (error.message === POST_MESSAGES.errors.postNotFound || error.message === POST_MESSAGES.errors.userNotFound) {
+      return res.status(404).json({
+        message: error.message,
+      });
+    }
+
+    console.error("Erreur createCommentHandler :", error);
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableCreateComment,
+    });
+  }
+};
+
+export const favoritePostHandler = async (req, res) => {
+  try {
+    const postId = Number(req.params.id);
+    const userId = req.user?.id ?? req.user?.userId;
+
+    if (!postId || Number.isNaN(postId)) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.invalidPostId,
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    const favoriteResult = await favoritePost(postId, userId);
+
+    if (favoriteResult.created) {
+      await createNotificationIfRelevant({
+        userId: favoriteResult.postAuthorId,
+        actorId: userId,
+        type: NOTIFICATION_TYPES.FAVORITE,
+        postId,
+      });
+    }
+
+    return res.status(200).json({
+      message: POST_MESSAGES.success.postFavorited,
+    });
+  } catch (error) {
+    console.error("Erreur favoritePostHandler :", error);
+    const status = postErrorStatus(error);
+
+    if (status) {
+      return res.status(status).json({
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableFavoritePost,
+    });
+  }
+};
+
+export const unfavoritePostHandler = async (req, res) => {
+  try {
+    const postId = Number(req.params.id);
+    const userId = req.user?.id ?? req.user?.userId;
+
+    if (!postId || Number.isNaN(postId)) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.invalidPostId,
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    const unfavoriteResult = await unfavoritePost(postId, userId);
+
+    if (unfavoriteResult.removed) {
+      await deleteNotificationIfExists({
+        userId: unfavoriteResult.postAuthorId,
+        actorId: userId,
+        type: NOTIFICATION_TYPES.FAVORITE,
+        postId,
+      });
+    }
+
+    return res.status(200).json({
+      message: POST_MESSAGES.success.postUnfavorited,
+    });
+  } catch (error) {
+    const status = postErrorStatus(error);
+
+    if (status) {
+      return res.status(status).json({
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableUnfavoritePost,
+    });
+  }
+};
+
+export const likeCommentHandler = async (req, res) => {
+  try {
+    const commentId = Number(req.params.id);
+    const userId = req.user?.id ?? req.user?.userId;
+
+    if (Number.isNaN(commentId) || commentId < 1) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.invalidCommentId,
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    const likeResult = await likeComment(commentId, userId);
+
+    if (likeResult.created) {
+      await createNotificationIfRelevant({
+        userId: likeResult.commentAuthorId,
+        actorId: userId,
+        type: NOTIFICATION_TYPES.COMMENT_LIKE,
+        postId: likeResult.postId,
+      });
+    }
+
+    return res.status(200).json({
+      message: POST_MESSAGES.success.commentLiked,
+    });
+  } catch (error) {
+    console.error("Erreur likeCommentHandler :", error);
+    const status = postErrorStatus(error);
+
+    if (status) {
+      return res.status(status).json({
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableLikeComment,
+    });
+  }
+};
+
+export const unlikeCommentHandler = async (req, res) => {
+  try {
+    const commentId = Number(req.params.id);
+    const userId = req.user?.id ?? req.user?.userId;
+
+    if (Number.isNaN(commentId) || commentId < 1) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.invalidCommentId,
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    const unlikeResult = await unlikeComment(commentId, userId);
+
+    if (unlikeResult.removed) {
+      await deleteNotificationIfExists({
+        userId: unlikeResult.commentAuthorId,
+        actorId: userId,
+        type: NOTIFICATION_TYPES.COMMENT_LIKE,
+        postId: unlikeResult.postId,
+      });
+    }
+
+    return res.status(200).json({
+      message: POST_MESSAGES.success.commentUnliked,
+    });
+  } catch (error) {
+    console.error("Erreur unlikeCommentHandler :", error);
+    const status = postErrorStatus(error);
+
+    if (status) {
+      return res.status(status).json({
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableUnlikeComment,
+    });
+  }
+};
+
+export const favoriteCommentHandler = async (req, res) => {
+  try {
+    const commentId = Number(req.params.id);
+    const userId = req.user?.id ?? req.user?.userId;
+
+    if (Number.isNaN(commentId) || commentId < 1) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.invalidCommentId,
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    const favResult = await favoriteComment(commentId, userId);
+
+    if (favResult.created) {
+      await createNotificationIfRelevant({
+        userId: favResult.commentAuthorId,
+        actorId: userId,
+        type: NOTIFICATION_TYPES.COMMENT_FAVORITE,
+        postId: favResult.postId,
+      });
+    }
+
+    return res.status(200).json({
+      message: POST_MESSAGES.success.commentFavorited,
+    });
+  } catch (error) {
+    console.error("Erreur favoriteCommentHandler :", error);
+    const status = postErrorStatus(error);
+
+    if (status) {
+      return res.status(status).json({
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableFavoriteComment,
+    });
+  }
+};
+
+export const unfavoriteCommentHandler = async (req, res) => {
+  try {
+    const commentId = Number(req.params.id);
+    const userId = req.user?.id ?? req.user?.userId;
+
+    if (Number.isNaN(commentId) || commentId < 1) {
+      return res.status(400).json({
+        message: POST_MESSAGES.errors.invalidCommentId,
+      });
+    }
+
+    if (!userId) {
+      return res.status(401).json({
+        message: POST_MESSAGES.errors.userNotFoundInToken,
+      });
+    }
+
+    const unfavResult = await unfavoriteComment(commentId, userId);
+
+    if (unfavResult.removed) {
+      await deleteNotificationIfExists({
+        userId: unfavResult.commentAuthorId,
+        actorId: userId,
+        type: NOTIFICATION_TYPES.COMMENT_FAVORITE,
+        postId: unfavResult.postId,
+      });
+    }
+
+    return res.status(200).json({
+      message: POST_MESSAGES.success.commentUnfavorited,
+    });
+  } catch (error) {
+    console.error("Erreur unfavoriteCommentHandler :", error);
+    const status = postErrorStatus(error);
+
+    if (status) {
+      return res.status(status).json({
+        message: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      message: error.message || POST_MESSAGES.errors.unableUnfavoriteComment,
+    });
+  }
+};
+
+
+export default {
+  createPostHandler,
+  getPostsHandler,
+  getFriendsPostsHandler,
+  searchPostsHandler,
+  deletePostHandler,
+  likePostHandler,
+  unlikePostHandler,
+  createCommentHandler,
+  deleteCommentHandler,
+  likeCommentHandler,
+  unlikeCommentHandler,
+  favoritePostHandler,
+  unfavoritePostHandler,
+  favoriteCommentHandler,
+  unfavoriteCommentHandler,
+};

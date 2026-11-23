@@ -1,0 +1,418 @@
+import prisma from "../prisma.js";
+import {
+    createNotificationIfRelevant,
+    NOTIFICATION_TYPES,
+} from "../services/notificationService.js";
+
+function toFriendPreview(user) {
+    return {
+        id: user.id,
+        username: user.username,
+        displayName: user.displayName ?? null,
+        avatar: user.avatar ?? null,
+    };
+}
+
+function buildMutualFriendSuggestions({ currentUserId, connectedUserIds, networkRelations, limit }) {
+    const connectedSet = new Set(connectedUserIds);
+    const candidateMap = new Map();
+    const mutualCounts = new Map();
+
+    for (const relation of networkRelations) {
+        const sender = toFriendPreview(relation.sender);
+        const receiver = toFriendPreview(relation.receiver);
+        const participants = [sender, receiver];
+
+        for (const participant of participants) {
+            if (participant.id === currentUserId || connectedSet.has(participant.id)) {
+                continue;
+            }
+
+            candidateMap.set(participant.id, participant);
+            mutualCounts.set(participant.id, (mutualCounts.get(participant.id) ?? 0) + 1);
+        }
+    }
+
+    return [...candidateMap.values()]
+        .sort((left, right) => {
+            const mutualDiff = (mutualCounts.get(right.id) ?? 0) - (mutualCounts.get(left.id) ?? 0);
+
+            if (mutualDiff !== 0) {
+                return mutualDiff;
+            }
+
+            return left.username.localeCompare(right.username);
+        })
+        .slice(0, limit);
+}
+
+
+export async function addFriend(req, res) {
+    try {
+        const senderId = req.user.id;
+        const receiverId = Number(req.body?.receiverId);
+
+        if (Number.isNaN(receiverId) || receiverId < 1) {
+            return res.status(400).json({ message: "receiverId is required" });
+        }
+
+        if (senderId === receiverId) {
+            return res.status(400).json({ message: "You cannot add yourself" });
+        }
+
+        const receiver = await prisma.user.findUnique({
+            where: { id: receiverId }
+        });
+
+        if (!receiver) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        const existing = await prisma.friends.findFirst({
+            where: {
+                OR: [
+                    { senderId, receiverId },
+                    { senderId: receiverId, receiverId: senderId }
+                ]
+            }
+        });
+
+        if (existing) {
+            return res.status(400).json({ message: "Friend request already exists" });
+        }
+
+        const request = await prisma.friends.create({
+            data: {
+                senderId,
+                receiverId,
+                status: "pending"
+            }
+        });
+
+        await createNotificationIfRelevant({
+            userId: receiverId,
+            actorId: senderId,
+            type: NOTIFICATION_TYPES.FOLLOW,
+        });
+
+        return res.status(201).json({
+            message: "Friend request sent",
+            request
+        });
+    } catch (error) {
+        console.error("addFriend error:", error);
+        return res.status(500).json({ message: "Failed to send friend request" });
+    }
+}
+
+export async function getFriends(req , res){
+    try {
+        const userId = req.user.id;
+
+        if (!userId) {
+            return res.status(400).json({ message: "userId is required" });
+        }
+
+        const friends = await prisma.friends.findMany({
+            where: {
+                AND : [
+                    { status: "accepted"},
+                    { OR: [{senderId:userId}, {receiverId: userId}]}
+                ]},
+            
+               include: {
+                            sender: { select: { id: true, username: true, displayName: true, avatar: true } },
+                            receiver: { select: { id: true, username: true, displayName: true, avatar: true } }
+}
+            });
+
+        const friendsList = friends.map(f => {
+            const otherUser = f.senderId === userId ? f.receiver : f.sender;
+
+            return {
+                ...otherUser,
+                friendshipId: f.id,
+            };
+        });
+
+        if (friends.length === 0) {
+            return res.json([]);
+            }
+
+        return res.status(200).json(friendsList);//envoyer la liste a res
+    }
+    catch (error) {
+        console.error("getFriends error: ", error);
+        return res.status(500).json({message: "Failed to get Friends"});
+    }
+
+}
+
+export async function acceptFriend(req, res) {
+    try {
+        const userId = req.user.id;
+        if (!userId) {
+            return res.status(400).json({ message: "userId required" });
+        }
+
+        const requestId = parseInt(req.params.id);
+
+        if (Number.isNaN(requestId) || requestId < 1) {
+            return res.status(400).json({ message: "Invalid friend request id." });
+        }
+
+        const friends = await prisma.friends.findUnique({
+            where: { id: requestId }
+        });
+
+        if (!friends) {
+            return res.status(404).json({ message: "Friend request not found" });
+        }
+
+        if (friends.receiverId !== userId) {
+            return res.status(403).json({ message: "Not authorized" });
+        }
+
+        if (friends.status !== "pending") {
+            return res.status(400).json({ message: "Request already handled" });
+        }
+
+        const updatedFriend = await prisma.friends.update({
+            where: { id: requestId },
+            data: { status: "accepted" }
+        });
+
+        await createNotificationIfRelevant({
+            userId: friends.senderId,
+            actorId: userId,
+            type: NOTIFICATION_TYPES.FOLLOW_ACCEPT,
+        });
+
+        return res.status(200).json({ friend: updatedFriend });
+    } catch (error) {
+        console.error("acceptFriend error:", error);
+        return res.status(500).json({ message: "Failed to accept friend" });
+    }
+}
+
+
+export async function deleteFriend(req, res) {
+    try {
+        const userId = req.user.id;
+        if (!userId) {
+            return res.status(400).json({ message: "userId is required" });
+        }
+
+        const friendId = parseInt(req.params.id);
+
+        if (Number.isNaN(friendId) || friendId < 1) {
+            return res.status(400).json({ message: "Invalid friend id." });
+        }
+
+        const friend = await prisma.friends.findFirst({
+            where: {
+                id: friendId,
+                OR: [{ senderId: userId }, { receiverId: userId }]
+            }
+        });
+
+        if (!friend) {
+            return res.status(404).json({ message: "Friend not found" });
+        }
+
+        const otherUserId = friend.senderId === userId ? friend.receiverId : friend.senderId;
+
+        await prisma.friends.delete({
+            where: { id: friend.id }
+        });
+
+        if (friend.status === "accepted") {
+            await createNotificationIfRelevant({
+                userId: otherUserId,
+                actorId: userId,
+                type: NOTIFICATION_TYPES.UNFOLLOW,
+            });
+        }
+
+        return res.status(200).json({ message: "Friend removed" });
+    } catch (error) {
+        console.error("deleteFriend error:", error);
+        return res.status(500).json({ message: "Failed to delete friend" });
+    }
+}
+
+export async function getFriendRequests(req, res) {
+    try {
+        const userId = req.user.id;
+        if (!userId) {
+            return res.status(400).json({ message: "userId is required" });
+        }
+
+        const requests = await prisma.friends.findMany({
+            where: {
+                receiverId: userId,
+                status: "pending"
+            },
+            include: {
+                sender: { select: { id: true, username: true, displayName: true, avatar: true } }
+            }
+        });
+
+        return res.status(200).json(requests);
+    } catch (error) {
+        console.error("getFriendRequests error:", error);
+        return res.status(500).json({ message: "Failed to get friend requests" });
+    }
+}
+
+export async function getSentFriendRequests(req, res) {
+    try {
+        const userId = req.user.id;
+        if (!userId) {
+            return res.status(400).json({ message: "userId is required" });
+        }
+
+        const requests = await prisma.friends.findMany({
+            where: {
+                senderId: userId,
+                status: "pending"
+            },
+            include: {
+                receiver: { select: { id: true, username: true, displayName: true, avatar: true } }
+            }
+        });
+
+        return res.status(200).json(requests);
+    } catch (error) {
+        console.error("getSentFriendRequests error:", error);
+        return res.status(500).json({ message: "Failed to get sent friend requests" });
+    }
+}
+
+export async function getUserFriends(req, res) {
+    try {
+        const targetUserId = parseInt(req.params.id);
+
+        if (Number.isNaN(targetUserId) || targetUserId < 1) {
+            return res.status(400).json({ message: "Invalid user id." });
+        }
+
+        const friends = await prisma.friends.findMany({
+            where: {
+                status: "accepted",
+                OR: [{ senderId: targetUserId }, { receiverId: targetUserId }],
+            },
+            include: {
+                sender: { select: { id: true, username: true, displayName: true, avatar: true } },
+                receiver: { select: { id: true, username: true, displayName: true, avatar: true } },
+            },
+        });
+
+        const friendsList = friends.map((f) =>
+            f.senderId === targetUserId ? f.receiver : f.sender
+        );
+
+        return res.status(200).json(friendsList);
+    } catch (error) {
+        console.error("getUserFriends error:", error);
+        return res.status(500).json({ message: "Failed to get user friends" });
+    }
+}
+
+export async function getFriendSuggestions(req, res) {
+    try {
+        const userId = req.user.id;
+        const requestedLimit = Number.parseInt(String(req.query.limit ?? ""), 10);
+        const limit = Number.isNaN(requestedLimit) ? 5 : Math.max(1, Math.min(requestedLimit, 12));
+
+        if (!userId) {
+            return res.status(400).json({ message: "userId is required" });
+        }
+
+        const directRelations = await prisma.friends.findMany({
+            where: {
+                status: "accepted",
+                OR: [{ senderId: userId }, { receiverId: userId }],
+            },
+            include: {
+                sender: { select: { id: true, username: true, displayName: true, avatar: true } },
+                receiver: { select: { id: true, username: true, displayName: true, avatar: true } },
+            },
+        });
+
+        const connectedUsers = directRelations.map((relation) =>
+            relation.senderId === userId ? toFriendPreview(relation.receiver) : toFriendPreview(relation.sender)
+        );
+        const connectedUserIds = connectedUsers.map((friend) => friend.id);
+
+        let rankedSuggestions = [];
+
+        if (connectedUserIds.length > 0) {
+            const networkRelations = await prisma.friends.findMany({
+                where: {
+                    status: "accepted",
+                    OR: [
+                        { senderId: { in: connectedUserIds } },
+                        { receiverId: { in: connectedUserIds } },
+                    ],
+                },
+                include: {
+                    sender: { select: { id: true, username: true, displayName: true, avatar: true } },
+                    receiver: { select: { id: true, username: true, displayName: true, avatar: true } },
+                },
+            });
+
+            rankedSuggestions = buildMutualFriendSuggestions({
+                currentUserId: userId,
+                connectedUserIds,
+                networkRelations,
+                limit,
+            });
+        }
+
+        if (rankedSuggestions.length >= limit) {
+            return res.status(200).json({
+                connectedUserIds,
+                suggestions: rankedSuggestions,
+            });
+        }
+
+        const excludedIds = [userId, ...connectedUserIds, ...rankedSuggestions.map((user) => user.id)];
+        const fallbackUsers = await prisma.user.findMany({
+            where: {
+                id: {
+                    notIn: excludedIds,
+                },
+            },
+            select: {
+                id: true,
+                username: true,
+                displayName: true,
+                avatar: true,
+            },
+            orderBy: {
+                username: "asc",
+            },
+            take: limit - rankedSuggestions.length,
+        });
+
+        return res.status(200).json({
+            connectedUserIds,
+            suggestions: [...rankedSuggestions, ...fallbackUsers.map(toFriendPreview)],
+        });
+    } catch (error) {
+        console.error("getFriendSuggestions error:", error);
+        return res.status(500).json({ message: "Failed to get friend suggestions" });
+    }
+}
+
+export default {
+    addFriend,
+    getFriends,
+    getUserFriends,
+    getFriendSuggestions,
+    acceptFriend,
+    deleteFriend,
+    getFriendRequests,
+    getSentFriendRequests,
+};

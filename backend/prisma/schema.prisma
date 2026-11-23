@@ -1,0 +1,185 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  username  String   @unique
+  displayName String?
+  email     String   @unique
+  password  String?
+  githubId  String?  @unique
+  fortyTwoId String? @unique
+  banner    String?
+  avatar    String?
+  bio       String?
+  status    String?
+  location  String?
+  website   String?
+  createdAt DateTime @default(now())
+  
+  twoFactorcode  String?  // secret code
+  twoFactorEnabled Boolean  @default(false)
+  twoFactorExpires DateTime?
+
+  posts           Post[]
+  likes           Like[]
+  comments        Comment[]
+  reposts         Repost[]
+  sentFriends     Friends[] @relation("sent")
+  receivedFriends Friends[] @relation("received")
+  notificationsReceived Notification[] @relation("notificationRecipient")
+  notificationsSent     Notification[] @relation("notificationActor")
+  favorites       Favorite[]
+  commentLikes     CommentLike[]
+  commentFavorites CommentFavorite[]
+  conversationMembers ConversationMember[]
+  sentMessages        Message[]
+}
+
+model Post {
+  id        Int        @id @default(autoincrement())
+  content   String
+  image     String?
+  createdAt DateTime   @default(now())
+  author    User       @relation(fields: [authorId], references: [id])
+  authorId  Int
+  likes     Like[]
+  comments  Comment[]
+  favorites Favorite[]
+  reposts   Repost[]
+  notifications Notification[]
+}
+
+model Favorite {
+  id     Int  @id @default(autoincrement())
+  user   User @relation(fields: [userId], references: [id])
+  userId Int
+  post   Post @relation(fields: [postId], references: [id])
+  postId Int
+
+  @@unique([userId, postId])
+}
+
+model Like {
+  id     Int  @id @default(autoincrement())
+  user   User @relation(fields: [userId], references: [id])
+  userId Int
+  post   Post @relation(fields: [postId], references: [id])
+  postId Int
+
+  @@unique([userId, postId])
+}
+
+model Comment {
+  id               Int               @id @default(autoincrement())
+  content          String
+  image            String?
+  createdAt        DateTime          @default(now())
+  user             User              @relation(fields: [userId], references: [id])
+  userId           Int
+  post             Post              @relation(fields: [postId], references: [id])
+  postId           Int
+  commentLikes     CommentLike[]
+  commentFavorites CommentFavorite[]
+}
+
+model Friends {
+  id         Int    @id @default(autoincrement())
+  sender     User   @relation("sent", fields: [senderId], references: [id])
+  senderId   Int
+  receiver   User   @relation("received", fields: [receiverId], references: [id])
+  receiverId Int
+  status     String @default("pending")
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  type      String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user      User     @relation("notificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+
+  actor     User     @relation("notificationActor", fields: [actorId], references: [id], onDelete: Cascade)
+  actorId   Int
+
+  post      Post?    @relation(fields: [postId], references: [id], onDelete: SetNull)
+  postId    Int?
+
+  @@index([userId])
+  @@index([actorId])
+  @@index([postId])
+}
+
+model CommentLike {
+  id        Int     @id @default(autoincrement())
+  user      User    @relation(fields: [userId], references: [id])
+  userId    Int
+  comment   Comment @relation(fields: [commentId], references: [id])
+  commentId Int
+
+  @@unique([userId, commentId])
+}
+
+model CommentFavorite {
+  id        Int     @id @default(autoincrement())
+  user      User    @relation(fields: [userId], references: [id])
+  userId    Int
+  comment   Comment @relation(fields: [commentId], references: [id])
+  commentId Int
+
+  @@unique([userId, commentId])
+}
+
+model Conversation {
+  id            Int                  @id @default(autoincrement())
+  directKey     String               @unique
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  lastMessageAt DateTime?
+  members       ConversationMember[]
+  messages      Message[]
+}
+
+model ConversationMember {
+  id                Int          @id @default(autoincrement())
+  conversation      Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId    Int
+  user              User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId            Int
+  lastReadMessageId Int?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id             Int          @id @default(autoincrement())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId Int
+  sender         User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  senderId       Int
+  content        String
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([senderId])
+}
+
+model Repost {
+  id     Int  @id @default(autoincrement())
+  user   User @relation(fields: [userId], references: [id])
+  userId Int
+  post   Post @relation(fields: [postId], references: [id])
+  postId Int
+
+  @@unique([userId, postId])
+}
