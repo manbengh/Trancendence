@@ -1,5 +1,5 @@
 # ft_transcendence
-
+ 
 ## About
 
 ft_transcendence is a full-stack web application developed as part of the 42 curriculum. It consists of building a social platform with real-time features, user interactions and a secure backend API.
